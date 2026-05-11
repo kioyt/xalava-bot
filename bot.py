@@ -1,3 +1,4 @@
+import sys; import types; sys.modules['imghdr'] = types.ModuleType('imghdr')
 import asyncio
 import logging
 import json
