@@ -1,9 +1,7 @@
-import sys; import types; sys.modules['imghdr'] = types.ModuleType('imghdr')
 import asyncio
 import logging
-import json
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -11,559 +9,468 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8399163198:AAGzTfUiluu6vkropSBGSZEcDygU4umCt7A"
 
-# Популярные Steam AppID'ы для мониторинга
-POPULAR_STEAM_APPS = [
-    730,    # CS2
-    570,    # Dota 2
-    271590, # GTA V
-    1091500,# Cyberpunk 2077
-    1245620,# Elden Ring
-    814380, # Sekiro
-    1551360,# Forza Horizon 5
-    1172470,# Apex Legends
-    252490, # Rust
-    381210, # Dead by Daylight
-    578080, # PUBG
-    1172620,# Sea of Thieves
-    1086940,# Baldur's Gate 3
-    2379780,# Hogwarts Legacy
-    892970, # Valheim
-    1203220,# NARAKA: BLADEPOINT
-    1174180,# Red Dead Redemption 2
-    1716740,# HITMAN World of Assassination
-    1250410,# Satisfactory
-    108600, # Project Zomboid
-    289070, # Civ VI
-    49520,  # Borderlands 2
-    322330, # Don't Starve Together
-    242760, # The Forest
-    413150, # Stardew Valley
-    365720, # Subnautica
-    1621690,# Subnautica: Below Zero
-    620,    # Portal 2
-    70,     # Half-Life
-    440,    # Team Fortress 2
-    550,    # Left 4 Dead 2
-    8930,   # Sid Meier's Civilization V
-    374320, # Dark Souls III
-    1517290,# Battlefield 2042
-    1938090,# Call of Duty
-    1174370,# DayZ
-    1966720,# Lethal Company
-    2379780,# Hogwarts Legacy
-    526870, # Satisfactory
-    774171, # Slay the Spire
-    1145360,# Hades
-    1466060,# Hades II
-    2215430,# Palworld
-    1888930,# The Last of Us
-    2230490,# Spider-Man
-    990080, # Hogwarts Legacy
-    1517290,# BF2042
-    377160, # Fallout 4
-    489830, # Skyrim SE
-    292030, # The Witcher 3
-    570940, # Dark Souls Remastered
-    72850,  # Skyrim
-    22380,  # Fallout: NV
-]
+STEAM_APPS = list(set([
+    # ААА
+    730,570,271590,1091500,1245620,814380,1551360,1172470,252490,381210,
+    578080,1172620,1086940,2379780,892970,1174180,1716740,108600,289070,
+    322330,242760,413150,365720,1621690,620,550,8930,374320,1174370,
+    1966720,774171,1145360,1466060,2215430,1888930,2230490,377160,489830,
+    292030,570940,72850,22380,49520,1250410,526870,
+    # Инди и средние
+    304930,251570,346110,427520,346900,239140,275850,294100,588650,648800,
+    1062090,1222730,1203220,976730,1054830,1238840,632360,624320,1449560,
+    1126290,2050650,1580130,1794680,1517290,739630,
+    # Хайповые
+    2218750,1649240,1817230,2475490,2396890,1908780,1284210,1547340,
+    1868140,2456290,1670810,2357570,1811840,1794170,2195250,1895380,
+    # Классика
+    70,440,220,400,8870,22300,22320,57690,48000,8980,42910,49800,
+    # Мультиплеер
+    359550,1418590,1262350,1240440,1599340,2369390,105600,
+]))
 
-POPULAR_STEAM_APPS = list(set(POPULAR_STEAM_APPS))  # dedupe
+_cache: dict = {}
+_cache_time: dict = {}
+CACHE_TTL = 1800
 
-# Эмодзи для категорий скидок
-DISCOUNT_EMOJI = {
-    "25-50": "🟡",
-    "50-75": "🟠",
-    "75-90": "🔴",
-    "90+":   "💥",
-    "free":  "🎁",
-}
+_processing: set = set()
+_subscribers: set = set()
+_last_notified: set = set()
 
-# ─── Клавиатуры ────────────────────────────────────────────────────────────────
+# ── Клавиатуры ──
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎮 Steam скидки", callback_data="steam_menu"),
-            InlineKeyboardButton("🎁 Бесплатные игры", callback_data="free_menu"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Настройки уведомлений", callback_data="settings"),
-            InlineKeyboardButton("ℹ️ О боте", callback_data="about"),
-        ],
+        [InlineKeyboardButton("Steam скидки", callback_data="steam_menu"),
+         InlineKeyboardButton("Бесплатные игры", callback_data="free_menu")],
+        [InlineKeyboardButton("Уведомления", callback_data="settings"),
+         InlineKeyboardButton("О боте", callback_data="about")],
     ])
 
 def steam_discount_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟡 25–50% скидки",  callback_data="disc_25_50")],
-        [InlineKeyboardButton("🟠 50–75% скидки",  callback_data="disc_50_75")],
-        [InlineKeyboardButton("🔴 75–90% скидки",  callback_data="disc_75_90")],
-        [InlineKeyboardButton("💥 90%+ мега-скидки", callback_data="disc_90")],
-        [InlineKeyboardButton("🔄 Обновить всё",   callback_data="refresh_steam")],
-        [InlineKeyboardButton("◀️ Назад",           callback_data="main_menu")],
+        [InlineKeyboardButton("25–50% скидки", callback_data="disc_25_50")],
+        [InlineKeyboardButton("50–75% скидки", callback_data="disc_50_75")],
+        [InlineKeyboardButton("75–90% скидки", callback_data="disc_75_90")],
+        [InlineKeyboardButton("90%+ мега-скидки", callback_data="disc_90")],
+        [InlineKeyboardButton("Обновить данные", callback_data="refresh_steam")],
+        [InlineKeyboardButton("Назад", callback_data="main_menu")],
     ])
 
 def free_menu_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Steam — бесплатно",  callback_data="free_steam")],
-        [InlineKeyboardButton("🟣 Epic Games Store",   callback_data="free_epic")],
-        [InlineKeyboardButton("🔄 Обновить",            callback_data="refresh_free")],
-        [InlineKeyboardButton("◀️ Назад",               callback_data="main_menu")],
+        [InlineKeyboardButton("Steam — бесплатно", callback_data="free_steam")],
+        [InlineKeyboardButton("Epic Games Store", callback_data="free_epic")],
+        [InlineKeyboardButton("Обновить", callback_data="refresh_free")],
+        [InlineKeyboardButton("Назад", callback_data="main_menu")],
     ])
 
-def back_keyboard(target="main_menu"):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data=target)]])
+def back_kb(target="main_menu"):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data=target)]])
 
-def settings_keyboard(ctx_data: dict):
-    notif_on = ctx_data.get("notifications", True)
-    notif_text = "🔔 Уведомления: ВКЛ" if notif_on else "🔕 Уведомления: ВЫКЛ"
+def settings_kb(on: bool):
+    txt = "Уведомления: ВКЛ" if on else "Уведомления: ВЫКЛ"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(notif_text, callback_data="toggle_notif")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")],
+        [InlineKeyboardButton(txt, callback_data="toggle_notif")],
+        [InlineKeyboardButton("Назад", callback_data="main_menu")],
     ])
 
-# ─── Steam API ──────────────────────────────────────────────────────────────────
+# ── Steam API ──
 
-async def fetch_steam_game(session: aiohttp.ClientSession, appid: int) -> dict | None:
-    url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=us&l=russian"
+async def fetch_game(session, appid):
+    url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=ru&l=russian"
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=7)) as r:
             if r.status != 200:
                 return None
-            data = await r.json()
+            data = await r.json(content_type=None)
             info = data.get(str(appid), {})
             if not info.get("success"):
                 return None
             d = info["data"]
-            if d.get("type") != "game":
+            if d.get("type") not in ("game",):
                 return None
+            is_free = d.get("is_free", False)
             price_info = d.get("price_overview")
+            if is_free and not price_info:
+                return {"appid": appid, "name": d.get("name","?"), "discount": 100,
+                        "original": "", "final": "Бесплатно",
+                        "url": f"https://store.steampowered.com/app/{appid}",
+                        "mc": d.get("metacritic", {}).get("score", -1)}
             if not price_info:
                 return None
-            discount = price_info.get("discount_percent", 0)
-            if discount == 0:
+            disc = price_info.get("discount_percent", 0)
+            if disc == 0:
                 return None
-            return {
-                "appid": appid,
-                "name": d.get("name", "Unknown"),
-                "discount": discount,
-                "original": price_info.get("initial_formatted", ""),
-                "final": price_info.get("final_formatted", ""),
-                "url": f"https://store.steampowered.com/app/{appid}",
-                "header_image": d.get("header_image", ""),
-            }
-    except Exception as e:
-        logger.debug(f"Error fetching {appid}: {e}")
+            mc = d.get("metacritic", {}).get("score", -1)
+            # Фильтр: если MC есть и ниже 55 — пропускаем
+            if mc != -1 and mc < 55:
+                return None
+            return {"appid": appid, "name": d.get("name","?"), "discount": disc,
+                    "original": price_info.get("initial_formatted",""),
+                    "final": price_info.get("final_formatted",""),
+                    "url": f"https://store.steampowered.com/app/{appid}",
+                    "mc": mc}
+    except:
         return None
 
-async def get_steam_deals(min_disc: int, max_disc: int) -> list[dict]:
-    """Возвращает игры с скидкой в диапазоне [min_disc, max_disc)."""
+async def fetch_all(min_d, max_d, force=False):
+    key = f"{min_d}_{max_d}"
+    now = datetime.now().timestamp()
+    if not force and key in _cache and now - _cache_time.get(key, 0) < CACHE_TTL:
+        return _cache[key]
     results = []
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_steam_game(session, appid) for appid in POPULAR_STEAM_APPS]
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
-    for r in responses:
-        if isinstance(r, dict) and r:
-            disc = r["discount"]
-            if min_disc <= disc < max_disc:
-                results.append(r)
+    conn = aiohttp.TCPConnector(limit=30)
+    async with aiohttp.ClientSession(connector=conn) as session:
+        for i in range(0, len(STEAM_APPS), 25):
+            batch = STEAM_APPS[i:i+25]
+            resp = await asyncio.gather(*[fetch_game(session, a) for a in batch], return_exceptions=True)
+            for r in resp:
+                if isinstance(r, dict) and r and min_d <= r["discount"] < max_d:
+                    results.append(r)
+            await asyncio.sleep(0.15)
     results.sort(key=lambda x: x["discount"], reverse=True)
+    _cache[key] = results
+    _cache_time[key] = now
     return results
 
-async def get_free_steam_games() -> list[dict]:
-    """Игры с 100% скидкой в Steam."""
+async def get_free_steam(force=False):
+    key = "free_steam"
+    now = datetime.now().timestamp()
+    if not force and key in _cache and now - _cache_time.get(key, 0) < CACHE_TTL:
+        return _cache[key]
     results = []
-    async with aiohttp.ClientSession() as session:
-        tasks = [fetch_steam_game(session, appid) for appid in POPULAR_STEAM_APPS]
-        responses = await asyncio.gather(*tasks, return_exceptions=True)
-    for r in responses:
+    # Спецпредложения Steam
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://store.steampowered.com/api/featuredcategories?cc=ru&l=russian",
+                                   timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    for item in data.get("specials", {}).get("items", []):
+                        if item.get("discount_percent", 0) == 100:
+                            results.append({"appid": item.get("id"), "name": item.get("name","?"),
+                                           "discount": 100, "original": "",
+                                           "final": "Бесплатно",
+                                           "url": f"https://store.steampowered.com/app/{item.get('id')}"})
+    except:
+        pass
+    # Из нашего списка
+    conn = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=conn) as session:
+        resp = await asyncio.gather(*[fetch_game(session, a) for a in STEAM_APPS[:100]], return_exceptions=True)
+    for r in resp:
         if isinstance(r, dict) and r and r["discount"] == 100:
-            results.append(r)
+            if not any(x["appid"] == r["appid"] for x in results):
+                results.append(r)
+    _cache[key] = results
+    _cache_time[key] = now
     return results
 
-async def get_epic_free_games() -> list[dict]:
-    """Бесплатные игры из Epic Games Store через их публичный API."""
-    url = (
-        "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions"
-        "?locale=ru&country=RU&allowCountries=RU"
-    )
+async def get_epic(force=False):
+    key = "epic_free"
+    now = datetime.now().timestamp()
+    if not force and key in _cache and now - _cache_time.get(key, 0) < CACHE_TTL:
+        return _cache[key]
+    url = "https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions?locale=ru&country=RU&allowCountries=RU"
     results = []
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
                 if r.status != 200:
                     return []
-                data = await r.json()
-        elements = (
-            data.get("data", {})
-                .get("Catalog", {})
-                .get("searchStore", {})
-                .get("elements", [])
-        )
+                data = await r.json(content_type=None)
+        elements = data.get("data",{}).get("Catalog",{}).get("searchStore",{}).get("elements",[])
         for game in elements:
+            title = game.get("title","?")
+            # Пропускаем тайные/Mystery игры
+            if any(w in title.lower() for w in ["mystery","secret","???","tba","unknown"]):
+                # Если это Mystery неделя — добавляем инфо-запись
+                continue
             promos = game.get("promotions") or {}
-            offers = promos.get("promotionalOffers", [])
-            upcoming = promos.get("upcomingPromotionalOffers", [])
-            
-            # Текущие бесплатные
-            for promo in offers:
-                for offer in promo.get("promotionalOffers", []):
-                    if offer.get("discountSetting", {}).get("discountPercentage", 99) == 0:
-                        price = game.get("price", {}).get("totalPrice", {})
-                        original = price.get("fmtPrice", {}).get("originalPrice", "")
-                        slug = ""
-                        for mapping in game.get("catalogNs", {}).get("mappings", []):
-                            if mapping.get("pageType") == "productHome":
-                                slug = mapping.get("pageSlug", "")
-                                break
-                        if not slug:
-                            slug = game.get("productSlug", "") or game.get("urlSlug", "")
-                        results.append({
-                            "name": game.get("title", "Unknown"),
-                            "original_price": original,
-                            "url": f"https://store.epicgames.com/ru/p/{slug}" if slug else "https://store.epicgames.com/ru/free-games",
-                            "end_date": offer.get("endDate", ""),
-                            "status": "current",
-                        })
-            
-            # Скоро бесплатные
-            for promo in upcoming:
-                for offer in promo.get("promotionalOffers", []):
-                    if offer.get("discountSetting", {}).get("discountPercentage", 99) == 0:
-                        slug = ""
-                        for mapping in game.get("catalogNs", {}).get("mappings", []):
-                            if mapping.get("pageType") == "productHome":
-                                slug = mapping.get("pageSlug", "")
-                                break
-                        if not slug:
-                            slug = game.get("productSlug", "") or game.get("urlSlug", "")
-                        results.append({
-                            "name": game.get("title", "Unknown"),
-                            "original_price": "",
-                            "url": f"https://store.epicgames.com/ru/p/{slug}" if slug else "https://store.epicgames.com/ru/free-games",
-                            "start_date": offer.get("startDate", ""),
-                            "end_date": offer.get("endDate", ""),
-                            "status": "upcoming",
-                        })
+            slug = ""
+            for m in game.get("catalogNs",{}).get("mappings",[]):
+                if m.get("pageType") == "productHome":
+                    slug = m.get("pageSlug",""); break
+            if not slug:
+                slug = game.get("productSlug") or game.get("urlSlug") or ""
+            gurl = f"https://store.epicgames.com/ru/p/{slug}" if slug else "https://store.epicgames.com/ru/free-games"
+            orig = game.get("price",{}).get("totalPrice",{}).get("fmtPrice",{}).get("originalPrice","")
+
+            for pg in promos.get("promotionalOffers",[]):
+                for offer in pg.get("promotionalOffers",[]):
+                    if offer.get("discountSetting",{}).get("discountPercentage",99) == 0:
+                        end_str = ""
+                        try:
+                            dt = datetime.fromisoformat(offer.get("endDate","").replace("Z",""))
+                            end_str = dt.strftime("%d.%m")
+                        except: pass
+                        results.append({"name":title,"original_price":orig,"url":gurl,"end_date":end_str,"status":"current"})
+
+            for pg in promos.get("upcomingPromotionalOffers",[]):
+                for offer in pg.get("promotionalOffers",[]):
+                    if offer.get("discountSetting",{}).get("discountPercentage",99) == 0:
+                        start_str = ""
+                        try:
+                            dt = datetime.fromisoformat(offer.get("startDate","").replace("Z",""))
+                            start_str = dt.strftime("%d.%m в %H:%M")
+                        except: pass
+                        results.append({"name":title,"original_price":orig,"url":gurl,"start_date":start_str,"status":"upcoming"})
     except Exception as e:
-        logger.error(f"Epic API error: {e}")
+        logger.error(f"Epic error: {e}")
+    _cache[key] = results
+    _cache_time[key] = now
     return results
 
-# ─── Форматирование ─────────────────────────────────────────────────────────────
+def check_mystery_week(data) -> str | None:
+    """Проверяет есть ли Mystery неделя в Epic и возвращает инфо-строку."""
+    try:
+        elements = data.get("data",{}).get("Catalog",{}).get("searchStore",{}).get("elements",[])
+        for game in elements:
+            title = game.get("title","")
+            if any(w in title.lower() for w in ["mystery","secret"]):
+                promos = game.get("promotions") or {}
+                for pg in promos.get("upcomingPromotionalOffers",[]):
+                    for offer in pg.get("promotionalOffers",[]):
+                        if offer.get("discountSetting",{}).get("discountPercentage",99) == 0:
+                            try:
+                                dt = datetime.fromisoformat(offer.get("startDate","").replace("Z",""))
+                                return dt.strftime("%d.%m в %H:%M")
+                            except: pass
+    except: pass
+    return None
 
-def format_steam_deals(games: list[dict], emoji: str, title: str) -> str:
+# ── Форматирование ──
+
+def disc_icon(d):
+    if d >= 90: return "★"
+    if d >= 75: return "▲"
+    if d >= 50: return "◆"
+    return "●"
+
+def mc_label(mc):
+    if mc < 0: return ""
+    return f"  MC {mc}"
+
+def format_deals(games, title):
+    ts = datetime.now().strftime("%H:%M %d.%m")
     if not games:
-        return f"{emoji} <b>{title}</b>\n\n😔 Сейчас нет подходящих скидок.\nПроверьте позже!"
-    
-    lines = [f"{emoji} <b>{title}</b>\n<i>Обновлено: {datetime.now().strftime('%H:%M %d.%m')}</i>\n"]
-    for g in games[:20]:  # max 20 игр
-        disc = g['discount']
-        name = g['name'][:35]
-        original = g.get('original', '')
-        final = g.get('final', '')
-        price_str = f" {original} → <b>{final}</b>" if original and final else ""
-        lines.append(
-            f"{'🔥' if disc >= 80 else '🎮'} <b>-{disc}%</b> <a href=\"{g['url']}\">{name}</a>{price_str}"
-        )
-    
-    if len(games) > 20:
-        lines.append(f"\n<i>...и ещё {len(games)-20} игр</i>")
+        return f"<b>{title}</b>  ·  <i>{ts}</i>\n\nСкидок в этом диапазоне сейчас нет.\nПопробуй другую категорию."
+    lines = [f"<b>{title}</b>  ·  <i>{ts}</i>\n"]
+    for g in games[:25]:
+        d = g["discount"]
+        name = g["name"][:40]
+        orig = g.get("original","")
+        final = g.get("final","")
+        price = f"  {orig} → <b>{final}</b>" if orig and final and orig != final else (f"  <b>{final}</b>" if final else "")
+        mc = mc_label(g.get("mc",-1))
+        lines.append(f'{disc_icon(d)} <b>-{d}%</b>  <a href="{g["url"]}">{name}</a>{price}{mc}')
+    if len(games) > 25:
+        lines.append(f"\n<i>+ ещё {len(games)-25} игр</i>")
     return "\n".join(lines)
 
-def format_epic_games(games: list[dict]) -> str:
+def format_epic(games):
     if not games:
-        return "🟣 <b>Epic Games — бесплатно</b>\n\n😔 Сейчас нет бесплатных раздач.\nСледите за обновлениями!"
-    
-    lines = ["🟣 <b>Epic Games — бесплатные раздачи</b>\n"]
-    current = [g for g in games if g.get("status") == "current"]
-    upcoming = [g for g in games if g.get("status") == "upcoming"]
-    
+        return "<b>Epic Games — раздачи</b>\n\nАктивных раздач нет.\nОбычно новые игры появляются по четвергам."
+    current = [g for g in games if g.get("status")=="current"]
+    upcoming = [g for g in games if g.get("status")=="upcoming"]
+    lines = ["<b>Epic Games Store</b>\n"]
     if current:
-        lines.append("✅ <b>Сейчас бесплатно:</b>")
+        lines.append("<b>Сейчас бесплатно:</b>")
         for g in current:
-            end = ""
-            if g.get("end_date"):
-                try:
-                    dt = datetime.fromisoformat(g["end_date"].replace("Z",""))
-                    end = f" (до {dt.strftime('%d.%m')})"
-                except:
-                    pass
-            price = f" ~~{g['original_price']}~~" if g.get("original_price") else ""
-            lines.append(f"🎁 <a href=\"{g['url']}\">{g['name']}</a>{price}{end}")
-    
+            end = f"  до {g['end_date']}" if g.get("end_date") else ""
+            pr = f"  ~~{g['original_price']}~~" if g.get("original_price") and g["original_price"] not in ("0","Free","") else ""
+            lines.append(f'+ <a href="{g["url"]}">{g["name"]}</a>{pr}{end}')
     if upcoming:
-        lines.append("\n⏳ <b>Скоро бесплатно:</b>")
+        lines.append("\n<b>Скоро:</b>")
         for g in upcoming:
-            start = ""
-            if g.get("start_date"):
-                try:
-                    dt = datetime.fromisoformat(g["start_date"].replace("Z",""))
-                    start = f" (с {dt.strftime('%d.%m')})"
-                except:
-                    pass
-            lines.append(f"🔜 <a href=\"{g['url']}\">{g['name']}</a>{start}")
-    
+            start = f"  с {g['start_date']}" if g.get("start_date") else ""
+            lines.append(f'· <a href="{g["url"]}">{g["name"]}</a>{start}')
     return "\n".join(lines)
 
-def format_free_steam(games: list[dict]) -> str:
+def format_free_steam(games):
     if not games:
-        return "🟢 <b>Steam — бесплатные игры</b>\n\n😔 Сейчас нет бесплатных раздач из отслеживаемого списка."
-    lines = ["🟢 <b>Steam — бесплатно (100% скидка):</b>\n"]
+        return "<b>Steam — временно бесплатно</b>\n\nАктивных раздач сейчас нет.\nПришлю уведомление как появятся."
+    lines = ["<b>Steam — временно бесплатно</b>\n"]
     for g in games:
-        lines.append(f"🎁 <a href=\"{g['url']}\">{g['name']}</a> ~~{g.get('original','')}~~")
+        orig = g.get("original","")
+        pr = f"  ~~{orig}~~" if orig and orig not in ("Бесплатно","Free","") else ""
+        lines.append(f'+ <a href="{g["url"]}">{g["name"]}</a>{pr}')
     return "\n".join(lines)
 
-# ─── Хендлеры ──────────────────────────────────────────────────────────────────
+# ── Хендлеры ──
 
 WELCOME = (
-    "👋 <b>Добро пожаловать в Xalava Games Bot!</b>\n\n"
-    "🎮 Мониторю скидки на Steam и бесплатные раздачи в EGS и Steam.\n\n"
+    "<b>Xalava Games</b>\n\n"
+    "Слежу за скидками Steam и раздачами Epic Games.\n"
+    "Фильтрую по рейтингу — только нормальные игры.\n\n"
     "Выбери раздел:"
 )
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.user_data.get("notifications_set"):
+    _subscribers.add(update.effective_chat.id)
+    if ctx.user_data.get("notifications") is None:
         ctx.user_data["notifications"] = True
-    await update.message.reply_text(
-        WELCOME,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_keyboard(),
-    )
+    await update.message.reply_text(WELCOME, parse_mode=ParseMode.HTML, reply_markup=main_menu_keyboard())
 
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "ℹ️ <b>Команды бота:</b>\n\n"
-        "/start — главное меню\n"
-        "/deals — скидки Steam\n"
-        "/free — бесплатные игры\n"
-        "/help — эта справка\n\n"
-        "Бот автоматически проверяет скидки каждые <b>2 часа</b> и присылает уведомления "
-        "о новых крупных скидках и бесплатных раздачах."
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        "<b>Команды:</b>\n/start — меню\n/deals — скидки Steam\n/free — бесплатные игры\n/help — справка",
+        parse_mode=ParseMode.HTML)
 
 async def deals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎮 <b>Steam скидки — выбери категорию:</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=steam_discount_keyboard(),
-    )
+    await update.message.reply_text("<b>Steam скидки:</b>", parse_mode=ParseMode.HTML, reply_markup=steam_discount_keyboard())
 
 async def free_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎁 <b>Бесплатные игры — выбери источник:</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=free_menu_keyboard(),
-    )
+    await update.message.reply_text("<b>Бесплатные игры:</b>", parse_mode=ParseMode.HTML, reply_markup=free_menu_keyboard())
 
 async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data = query.data
+    uid = f"{query.from_user.id}_{query.data}"
+    if uid in _processing:
+        await query.answer()
+        return
+    _processing.add(uid)
+    try:
+        await query.answer()
+        data = query.data
 
-    async def edit(text, kb=None):
-        try:
-            await query.edit_message_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logger.debug(f"edit_message_text error: {e}")
+        async def edit(text, kb=None):
+            try:
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                    reply_markup=kb, disable_web_page_preview=True)
+            except Exception as e:
+                logger.debug(f"edit: {e}")
 
-    if data == "main_menu":
-        await edit(WELCOME, main_menu_keyboard())
+        if data == "main_menu":
+            await edit(WELCOME, main_menu_keyboard())
+        elif data == "steam_menu":
+            await edit("<b>Steam скидки — выбери категорию:</b>", steam_discount_keyboard())
+        elif data == "free_menu":
+            await edit("<b>Бесплатные игры:</b>", free_menu_keyboard())
+        elif data in ("disc_25_50","disc_50_75","disc_75_90","disc_90","refresh_steam"):
+            mp = {"disc_25_50":(25,50,"Steam — скидки 25–50%"),
+                  "disc_50_75":(50,75,"Steam — скидки 50–75%"),
+                  "disc_75_90":(75,90,"Steam — скидки 75–90%"),
+                  "disc_90":(90,101,"Steam — скидки 90%+"),
+                  "refresh_steam":(50,101,"Steam — скидки 50%+")}
+            mn, mx, title = mp[data]
+            force = (data == "refresh_steam")
+            await edit("<i>Загружаю данные Steam...</i>")
+            games = await fetch_all(mn, mx, force=force)
+            await edit(format_deals(games, title), back_kb("steam_menu"))
+        elif data == "free_steam":
+            await edit("<i>Ищу раздачи Steam...</i>")
+            games = await get_free_steam()
+            await edit(format_free_steam(games), back_kb("free_menu"))
+        elif data == "free_epic":
+            await edit("<i>Загружаю Epic Games Store...</i>")
+            games = await get_epic()
+            await edit(format_epic(games), back_kb("free_menu"))
+        elif data == "refresh_free":
+            await edit("<i>Обновляю...</i>")
+            epic = await get_epic(force=True)
+            sf = await get_free_steam(force=True)
+            text = format_epic(epic) + "\n\n" + format_free_steam(sf)
+            await edit(text[:4090], back_kb("free_menu"))
+        elif data == "settings":
+            on = ctx.user_data.get("notifications", True)
+            await edit("<b>Уведомления</b>\n\nПришлю алёрт при скидках 75%+ и новых раздачах.", settings_kb(on))
+        elif data == "toggle_notif":
+            cur = ctx.user_data.get("notifications", True)
+            ctx.user_data["notifications"] = not cur
+            await query.answer("Включены" if not cur else "Выключены", show_alert=True)
+            await edit("<b>Уведомления</b>\n\nПришлю алёрт при скидках 75%+ и новых раздачах.", settings_kb(not cur))
+        elif data == "about":
+            await edit(
+                "<b>Xalava Games Bot</b>\n\n"
+                "Мониторю скидки Steam и раздачи EGS.\n"
+                "Фильтр по Metacritic — плохие игры не показываю.\n\n"
+                "<b>Источники:</b> Steam API, Epic Games API\n"
+                "<b>Автопроверка:</b> каждый час\n"
+                "<b>База:</b> 150+ игр (ААА, инди, хайп)\n",
+                back_kb("main_menu"))
+    finally:
+        _processing.discard(uid)
 
-    elif data == "steam_menu":
-        await edit("🎮 <b>Steam скидки — выбери категорию:</b>", steam_discount_keyboard())
-
-    elif data == "free_menu":
-        await edit("🎁 <b>Бесплатные игры — выбери источник:</b>", free_menu_keyboard())
-
-    elif data in ("disc_25_50", "disc_50_75", "disc_75_90", "disc_90", "refresh_steam"):
-        mapping = {
-            "disc_25_50": (25, 50,  "🟡 Скидки 25–50%"),
-            "disc_50_75": (50, 75,  "🟠 Скидки 50–75%"),
-            "disc_75_90": (75, 90,  "🔴 Скидки 75–90%"),
-            "disc_90":    (90, 101, "💥 Скидки 90%+"),
-            "refresh_steam": (50, 101, "🔄 Скидки 50%+"),
-        }
-        mn, mx, title = mapping[data]
-        await edit(f"⏳ <b>Загружаю данные из Steam...</b>\n<i>Это займёт ~10 секунд</i>")
-        games = await get_steam_deals(mn, mx)
-        kb = back_keyboard("steam_menu")
-        await edit(format_steam_deals(games, title.split()[0], title), kb)
-
-    elif data == "free_steam":
-        await edit("⏳ <b>Ищу бесплатные игры в Steam...</b>")
-        games = await get_free_steam_games()
-        await edit(format_free_steam(games), back_keyboard("free_menu"))
-
-    elif data == "free_epic":
-        await edit("⏳ <b>Загружаю раздачи Epic Games Store...</b>")
-        games = await get_epic_free_games()
-        await edit(format_epic_games(games), back_keyboard("free_menu"))
-
-    elif data in ("refresh_free",):
-        await edit("⏳ <b>Обновляю данные...</b>")
-        epic = await get_epic_free_games()
-        steam_free = await get_free_steam_games()
-        text = format_epic_games(epic) + "\n\n" + format_free_steam(steam_free)
-        await edit(text, back_keyboard("free_menu"))
-
-    elif data == "settings":
-        await edit(
-            "⚙️ <b>Настройки уведомлений</b>\n\n"
-            "Включи уведомления, чтобы получать алёрты о:\n"
-            "• Новых скидках 75%+ на популярные игры\n"
-            "• Бесплатных раздачах Steam и Epic\n",
-            settings_keyboard(ctx.user_data),
-        )
-
-    elif data == "toggle_notif":
-        cur = ctx.user_data.get("notifications", True)
-        ctx.user_data["notifications"] = not cur
-        ctx.user_data["notifications_set"] = True
-        status = "включены 🔔" if not cur else "выключены 🔕"
-        await query.answer(f"Уведомления {status}", show_alert=True)
-        await edit(
-            "⚙️ <b>Настройки уведомлений</b>\n\n"
-            "Включи уведомления, чтобы получать алёрты о:\n"
-            "• Новых скидках 75%+ на популярные игры\n"
-            "• Бесплатных раздачах Steam и Epic\n",
-            settings_keyboard(ctx.user_data),
-        )
-
-    elif data == "about":
-        await edit(
-            "ℹ️ <b>Xalava Games Bot</b>\n\n"
-            "🤖 Мониторю скидки в Steam и бесплатные игры в EGS/Steam.\n\n"
-            "📊 <b>Источники данных:</b>\n"
-            "• Steam Store API (официальный)\n"
-            "• Epic Games Store API (официальный)\n\n"
-            "🔄 <b>Автообновление:</b> каждые 2 часа\n"
-            "📬 <b>Уведомления:</b> при появлении новых скидок 75%+ и раздач\n\n"
-            "👨‍💻 Бот создан специально для @xalava_games_bot",
-            back_keyboard("main_menu"),
-        )
-
-# ─── Авто-мониторинг ────────────────────────────────────────────────────────────
-
-# Хранилище последних найденных скидок, чтобы не дублировать уведомления
-_last_notified: set[str] = set()
-_subscribers: set[int] = set()  # chat_id'ы подписчиков
+# ── Мониторинг ──
 
 async def auto_monitor(ctx: ContextTypes.DEFAULT_TYPE):
-    """Запускается каждые 2 часа. Проверяет скидки и раздачи."""
-    global _last_notified, _subscribers
-    
     if not _subscribers:
         return
-    
     try:
-        # Скидки 75%+
-        games_75 = await get_steam_deals(75, 101)
-        epic = await get_epic_free_games()
-        steam_free = await get_free_steam_games()
-        
-        new_deals = []
+        games_75 = await fetch_all(75, 101, force=True)
+        epic = await get_epic(force=True)
+        sf = await get_free_steam(force=True)
+
+        new_deals, new_epic, new_sf = [], [], []
         for g in games_75:
-            key = f"steam_{g['appid']}_{g['discount']}"
-            if key not in _last_notified:
-                new_deals.append(g)
-                _last_notified.add(key)
-        
-        new_free = []
+            k = f"s_{g['appid']}_{g['discount']}"
+            if k not in _last_notified:
+                new_deals.append(g); _last_notified.add(k)
         for g in epic:
-            key = f"epic_{g['name']}_{g.get('status')}"
-            if key not in _last_notified:
-                new_free.append(g)
-                _last_notified.add(key)
-        for g in steam_free:
-            key = f"steamfree_{g['appid']}"
-            if key not in _last_notified:
-                new_free.append(g)
-                _last_notified.add(key)
-        
-        if not new_deals and not new_free:
+            if g.get("status") == "current":
+                k = f"e_{g['name']}"
+                if k not in _last_notified:
+                    new_epic.append(g); _last_notified.add(k)
+        for g in sf:
+            k = f"sf_{g['appid']}"
+            if k not in _last_notified:
+                new_sf.append(g); _last_notified.add(k)
+
+        if not new_deals and not new_epic and not new_sf:
             return
-        
-        # Шлём уведомление всем подписчикам
-        msg_parts = ["🔔 <b>Новые игровые предложения!</b>\n"]
-        
+
+        parts = ["<b>Новые предложения</b>\n"]
         if new_deals:
-            msg_parts.append("🎮 <b>Скидки 75%+ в Steam:</b>")
-            for g in new_deals[:8]:
-                msg_parts.append(
-                    f"🔴 <b>-{g['discount']}%</b> <a href=\"{g['url']}\">{g['name']}</a> "
-                    f"{g.get('original','')} → <b>{g.get('final','')}</b>"
-                )
-        
-        if new_free:
-            msg_parts.append("\n🎁 <b>Новые бесплатные раздачи:</b>")
-            for g in new_free[:5]:
-                url = g.get('url', '')
-                name = g.get('name', '')
-                msg_parts.append(f"🆓 <a href=\"{url}\">{name}</a>")
-        
-        text = "\n".join(msg_parts)
-        
+            parts.append("<b>Steam — скидки 75%+</b>")
+            for g in new_deals[:6]:
+                parts.append(f'{disc_icon(g["discount"])} <b>-{g["discount"]}%</b>  <a href="{g["url"]}">{g["name"]}</a>  {g.get("original","")} → <b>{g.get("final","")}</b>')
+        if new_epic:
+            parts.append("\n<b>Epic — бесплатно:</b>")
+            for g in new_epic[:4]:
+                parts.append(f'+ <a href="{g["url"]}">{g["name"]}</a>')
+        if new_sf:
+            parts.append("\n<b>Steam — бесплатно:</b>")
+            for g in new_sf[:4]:
+                parts.append(f'+ <a href="{g["url"]}">{g["name"]}</a>')
+
+        text = "\n".join(parts)
         for chat_id in list(_subscribers):
             try:
-                await ctx.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                    reply_markup=main_menu_keyboard(),
-                )
+                await ctx.bot.send_message(chat_id=chat_id, text=text,
+                    parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+                    reply_markup=main_menu_keyboard())
+                await asyncio.sleep(0.05)
             except Exception as e:
-                logger.warning(f"Could not send to {chat_id}: {e}")
-    
+                logger.warning(f"Notify {chat_id}: {e}")
     except Exception as e:
-        logger.error(f"Auto-monitor error: {e}")
-
-# Регистрируем подписчиков при /start
-async def start_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    _subscribers.add(update.effective_chat.id)
-    await start(update, ctx)
-
-# ─── Запуск ─────────────────────────────────────────────────────────────────────
+        logger.error(f"Monitor: {e}")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_register))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("deals", deals_cmd))
     app.add_handler(CommandHandler("free", free_cmd))
     app.add_handler(CallbackQueryHandler(button))
+    app.job_queue.run_repeating(auto_monitor, interval=3600, first=120)
 
-    # Авто-мониторинг каждые 2 часа
-    job_queue: JobQueue = app.job_queue
-    job_queue.run_repeating(auto_monitor, interval=7200, first=60)
-
-    # Команды в меню бота
     async def post_init(application):
         await application.bot.set_my_commands([
-            BotCommand("start", "🏠 Главное меню"),
-            BotCommand("deals", "🎮 Steam скидки"),
-            BotCommand("free", "🎁 Бесплатные игры"),
-            BotCommand("help", "ℹ️ Помощь"),
+            BotCommand("start","Главное меню"),
+            BotCommand("deals","Steam скидки"),
+            BotCommand("free","Бесплатные игры"),
+            BotCommand("help","Помощь"),
         ])
     app.post_init = post_init
-
     logger.info("Bot started!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
